@@ -65,15 +65,8 @@ class FuzzyFinderView extends SelectListView
     @subscriptions?.dispose()
     @subscriptions = null
 
-  viewForItem: ({filePath, projectRelativePath}) ->
+  viewForItem: ({filePath, projectRelativePath, matches}) ->
     # Style matched characters in search results
-    filterQuery = @getFilterQuery()
-
-    if @alternateScoring
-      matches = fuzzaldrinPlus.match(projectRelativePath, filterQuery)
-    else
-      matches = fuzzaldrin.match(projectRelativePath, filterQuery)
-
     $$ ->
 
       highlighter = (path, matches, offsetIndex) =>
@@ -175,9 +168,24 @@ class FuzzyFinderView extends SelectListView
     @list.empty()
     if filteredItems.length
       @setError(null)
-
+      displayedItems = []
       for i in [0...Math.min(filteredItems.length, @maxItems)]
         item = filteredItems[i]
+
+        if @alternateScoring
+          item.matches = fuzzaldrinPlus.match(item.projectRelativePath, filterQuery)
+          item.score = fuzzaldrinPlus.score(item.projectRelativePath, filterQuery)
+        else
+          item.matches = fuzzaldrin.match(item.projectRelativePath, filterQuery)
+          item.score = scorer.score(item.projectRelativePath, filterQuery)
+        skippedTotal = 0
+        for skip in item.skip
+          if !item.matches.some((match) -> match >= skip.start && match < skip.end)
+            skippedTotal += skip.end - skip.start
+        item.score *= item.projectRelativePath.length / (item.projectRelativePath.length - skippedTotal)
+        displayedItems.push(item)
+      displayedItems.sort((a, b) -> b.score - a.score)
+      for item in displayedItems
         itemView = $(@viewForItem(item))
         itemView.data('select-list-item', item)
         @list.append(itemView)
@@ -241,13 +249,35 @@ class FuzzyFinderView extends SelectListView
     # Don't regenerate project relative paths unless the file paths have changed
     if filePaths isnt @filePaths
       projectHasMultipleDirectories = atom.project.getDirectories().length > 1
+      projectOptions = {}
 
       @filePaths = filePaths
       @projectRelativePaths = @filePaths.map (filePath) ->
         [rootPath, projectRelativePath] = atom.project.relativizePath(filePath)
+        filteredProjectRelativePath = projectRelativePath
         if rootPath and projectHasMultipleDirectories
           projectRelativePath = path.join(path.basename(rootPath), projectRelativePath)
-        {filePath, projectRelativePath}
+        regexSet = []
+        if projectOptions[path.basename(rootPath)]
+          regexSet = projectOptions[path.basename(rootPath)]
+        else
+          filterPath = path.join(rootPath, '.fuzzfilter')
+          try
+            filterContent = fs.readFileSync(filterPath, 'utf8')
+            regexSet = filterContent.split("\n").filter (line) -> line.length
+                                                .map (line) -> new RegExp(line)
+          catch error
+            if error.code isnt 'ENOENT'
+              throw error
+          projectOptions[path.basename(rootPath)] = regexSet
+        skip = regexSet.map (regex) ->
+            regex.exec(projectRelativePath)
+          .filter (match) ->
+            match
+          .map (match) ->
+            { start: match.index, end: match.index + match[0].length }
+          # filteredProjectRelativePath = filteredProjectRelativePath.replace(filter, '')
+        {filePath, projectRelativePath, skip}
 
     @projectRelativePaths
 
